@@ -63,6 +63,35 @@ void onMouseEvent(int event, int x, int y, int f, void* ptr)
         x = round(x * pdata->ptScl);
         y = round(y * pdata->ptScl);
     }
+    
+    // Handle slider interactions in R_SLIDER mode
+    if (pdata->mode == ConfigGui::R_SLIDER && pdata->parent) {
+        switch(event) {
+            case cv::EVENT_LBUTTONDOWN:
+                pdata->activeSlider = pdata->parent->getSliderAtPosition(x, y);
+                if (pdata->activeSlider >= 0) {
+                    pdata->sliderDragging = true;
+                    pdata->parent->updateSliderValue(pdata->activeSlider, x);
+                    pdata->newEvent = true;
+                }
+                return;
+            
+            case cv::EVENT_LBUTTONUP:
+                pdata->sliderDragging = false;
+                pdata->activeSlider = -1;
+                return;
+            
+            case cv::EVENT_MOUSEMOVE:
+                pdata->cursorPt.x = x;
+                pdata->cursorPt.y = y;
+                if (pdata->sliderDragging && pdata->activeSlider >= 0) {
+                    pdata->parent->updateSliderValue(pdata->activeSlider, x);
+                    pdata->newEvent = true;
+                }
+                return;
+        }
+    }
+    
     switch(event)
     {
         case cv::EVENT_LBUTTONDOWN:
@@ -153,7 +182,11 @@ void createZoomROI(Mat& zoom_roi, const Mat& frame, const Point2d& pt, int orig_
 /// Constructor.
 ///
 ConfigGui::ConfigGui(string config_fn, string src_override)
-: _config_fn(config_fn)
+: _config_fn(config_fn),
+  _slider_elevation(180),
+  _slider_azimuth(180),
+  _slider_twist(180),
+  _slider_initialized(false)
 {
     /// Load and parse config file.
     if (_cfg.read(_config_fn) <= 0) {
@@ -286,6 +319,300 @@ bool ConfigGui::saveC2ATransform(const string& ref_str, const Mat& R, const Mat&
 }
 
 ///
+/// Compute rotation matrix from slider values.
+/// Sliders specify animal position and orientation on the ball.
+///
+bool ConfigGui::computeRtFromSliders(int el_slider, int az_slider, int twist_slider,
+                                      Mat& R, Mat& t, const double& roi_r, const CmPoint& roi_c)
+{
+    // Convert slider values to degrees
+    double el_deg = el_slider - 90;      // -90 to +90
+    double az_deg = az_slider - 180;     // -180 to +180
+    double twist_deg = twist_slider - 180; // -180 to +180
+    
+    // Convert to radians
+    double el = el_deg * CM_D2R;
+    double az = (az_deg + 180) * CM_D2R;  // Add 180 to flip: az=0 now means toward camera
+    double twist = twist_deg * CM_D2R;
+    
+    // Position on ball (radial outward direction in camera frame)
+    // Camera: +X=right, +Y=down, +Z=out
+    // At el=0, az=0: near side of ball (toward camera) [0, 0, -1]
+    // At el=+90: top of ball [0, -1, 0]
+    double px = cos(el) * sin(az);
+    double py = -sin(el);
+    double pz = cos(el) * cos(az);
+    
+    // Animal +Z (down) points toward ball center = -p
+    double aZx = -px, aZy = -py, aZz = -pz;
+    
+    // Reference forward direction at twist=0
+    double ref_fwd_x, ref_fwd_y, ref_fwd_z;
+    double ref_right_x, ref_right_y, ref_right_z;
+    
+    if (fabs(el_deg) > 89.0) {
+        // At poles, use camera Z as reference
+        if (el_deg > 0) {
+            // North pole: forward = away from camera
+            ref_fwd_x = 0; ref_fwd_y = 0; ref_fwd_z = 1;
+        } else {
+            // South pole: forward = toward camera
+            ref_fwd_x = 0; ref_fwd_y = 0; ref_fwd_z = -1;
+        }
+        ref_right_x = 1; ref_right_y = 0; ref_right_z = 0;
+    } else {
+        // Project "north" direction onto tangent plane
+        // North = [0, -1, 0] (toward top of ball in camera frame)
+        double north_x = 0, north_y = -1, north_z = 0;
+        double p_dot_north = px*north_x + py*north_y + pz*north_z;
+        double fwd_x = north_x - p_dot_north * px;
+        double fwd_y = north_y - p_dot_north * py;
+        double fwd_z = north_z - p_dot_north * pz;
+        double fwd_len = sqrt(fwd_x*fwd_x + fwd_y*fwd_y + fwd_z*fwd_z);
+        ref_fwd_x = fwd_x / fwd_len;
+        ref_fwd_y = fwd_y / fwd_len;
+        ref_fwd_z = fwd_z / fwd_len;
+        
+        // Right = down x forward (cross product)
+        ref_right_x = aZy*ref_fwd_z - aZz*ref_fwd_y;
+        ref_right_y = aZz*ref_fwd_x - aZx*ref_fwd_z;
+        ref_right_z = aZx*ref_fwd_y - aZy*ref_fwd_x;
+        double right_len = sqrt(ref_right_x*ref_right_x + ref_right_y*ref_right_y + ref_right_z*ref_right_z);
+        ref_right_x /= right_len;
+        ref_right_y /= right_len;
+        ref_right_z /= right_len;
+    }
+    
+    // Apply twist rotation about radial axis (p) using Rodrigues formula
+    double cos_t = cos(twist), sin_t = sin(twist);
+    auto rodrigues = [&](double vx, double vy, double vz, double& rx, double& ry, double& rz) {
+        double dot = px*vx + py*vy + pz*vz;
+        double cx = py*vz - pz*vy;
+        double cy = pz*vx - px*vz;
+        double cz = px*vy - py*vx;
+        rx = vx*cos_t + cx*sin_t + px*dot*(1-cos_t);
+        ry = vy*cos_t + cy*sin_t + py*dot*(1-cos_t);
+        rz = vz*cos_t + cz*sin_t + pz*dot*(1-cos_t);
+    };
+    
+    double aXx, aXy, aXz;  // Animal forward in camera frame
+    double aYx, aYy, aYz;  // Animal right in camera frame
+    rodrigues(ref_fwd_x, ref_fwd_y, ref_fwd_z, aXx, aXy, aXz);
+    rodrigues(ref_right_x, ref_right_y, ref_right_z, aYx, aYy, aYz);
+    
+    // Build rotation matrix (rows are animal basis vectors in camera coords)
+    // This is the animal-to-camera frame transform (columns are camera axes in animal frame)
+    // We need to transpose to match the convention used elsewhere (camera-to-animal)
+    Mat R_a2c = (cv::Mat_<double>(3,3) <<
+         aXx, aXy, aXz,
+         aYx, aYy, aYz,
+         aZx, aZy, aZz);
+    R = R_a2c.t();  // transpose to get camera-to-animal
+    
+    // Translation: use ball center from roi_c
+    if (roi_r > 0) {
+        double scale = 1.0 / tan(roi_r);
+        t = (cv::Mat_<double>(3,1) << roi_c.x * scale, roi_c.y * scale, roi_c.z * scale);
+    } else {
+        t = (cv::Mat_<double>(3,1) << 0, 0, 1);  // default if no roi
+    }
+    
+    return true;
+}
+
+///
+/// Save camera-animal transform computed from sliders.
+///
+bool ConfigGui::saveC2ATransformFromSliders(const Mat& R, const Mat& t)
+{
+    // Convert R to axis-angle
+    // R is camera-to-animal, need to transpose for matrixToOmega which expects animal-to-camera
+    CmPoint angleAxis = CmPoint64f::matrixToOmega(R.t());
+    
+    vector<double> cfg_r, cfg_t;
+    for (int i = 0; i < 3; i++) {
+        cfg_r.push_back(angleAxis[i]);
+        cfg_t.push_back(t.at<double>(i, 0));
+    }
+    
+    // Write to config file
+    LOG("Adding c2a_src, c2a_r, and c2a_t to config file and writing to disk (%s) ..", _config_fn.c_str());
+    _cfg.add("c2a_src", string("sliders"));
+    _cfg.add("c2a_r", cfg_r);
+    _cfg.add("c2a_t", cfg_t);
+    
+    if (_cfg.write() <= 0) {
+        LOG_ERR("Bad write!");
+        return false;
+    }
+    
+    return true;
+}
+
+///
+/// Draw custom sliders on the frame.
+///
+void ConfigGui::drawCustomSliders(Mat& frame)
+{
+    // Slider dimensions and positions
+    const int slider_x = 50;
+    const int slider_width = 500;
+    const int slider_height = 20;
+    const int slider_y_start = _h - 150;  // Use original height (before any scaling)
+    const int slider_spacing = 45;
+    
+    // Slider definitions: {name, min_value, max_value, current_slider_value}
+    struct SliderInfo {
+        string name;
+        int min_val;
+        int max_val;
+        int current_slider;
+    };
+    
+    SliderInfo sliders[3] = {
+        {"Elevation", -90, 90, _slider_elevation},
+        {"Azimuth", -180, 180, _slider_azimuth},
+        {"Twist", -180, 180, _slider_twist}
+    };
+    
+    for (int i = 0; i < 3; i++) {
+        int y = slider_y_start + i * slider_spacing;
+        
+        // Convert slider value (0-180 or 0-360) to actual value
+        int actual_value;
+        if (i == 0) {
+            actual_value = sliders[i].current_slider - 90;  // elevation
+        } else {
+            actual_value = sliders[i].current_slider - 180;  // azimuth/twist
+        }
+        
+        // Draw slider background (gray bar)
+        cv::rectangle(frame,
+                     cv::Point(slider_x, y),
+                     cv::Point(slider_x + slider_width, y + slider_height),
+                     Scalar(80, 80, 80),
+                     -1);
+                    
+        // Draw slider border
+        cv::rectangle(frame,
+                     cv::Point(slider_x, y),
+                     cv::Point(slider_x + slider_width, y + slider_height),
+                     Scalar(200, 200, 200),
+                     2);
+                    
+        // Calculate handle position based on actual value
+        int range = sliders[i].max_val - sliders[i].min_val;
+        float normalized = (actual_value - sliders[i].min_val) / (float)range;
+        int handle_x = slider_x + (int)(normalized * slider_width);
+        
+        // Draw handle (circle)
+        cv::circle(frame,
+                  cv::Point(handle_x, y + slider_height/2),
+                  12,
+                  Scalar(0, 255, 0),
+                  -1);
+        cv::circle(frame,
+                  cv::Point(handle_x, y + slider_height/2),
+                  12,
+                  Scalar(255, 255, 255),
+                  2);
+                 
+        // Draw label and value
+        char label[128];
+        snprintf(label, sizeof(label), "%s: %+d deg", sliders[i].name.c_str(), actual_value);
+        cv::putText(frame, label,
+                   cv::Point(slider_x + slider_width + 15, y + 15),
+                   cv::FONT_HERSHEY_SIMPLEX,
+                   0.5,
+                   Scalar(255, 255, 255),
+                   1,
+                   cv::LINE_AA);
+                  
+        // Draw min/max labels (below the slider bar for better spacing)
+        char min_label[16], max_label[16];
+        snprintf(min_label, sizeof(min_label), "%d", sliders[i].min_val);
+        snprintf(max_label, sizeof(max_label), "%d", sliders[i].max_val);
+        cv::putText(frame, min_label,
+                   cv::Point(slider_x - 5, y + slider_height + 15),
+                   cv::FONT_HERSHEY_SIMPLEX,
+                   0.5,
+                   Scalar(200, 200, 200),
+                   1,
+                   cv::LINE_AA);
+        cv::putText(frame, max_label,
+                   cv::Point(slider_x + slider_width - 25, y + slider_height + 15),
+                   cv::FONT_HERSHEY_SIMPLEX,
+                   0.5,
+                   Scalar(200, 200, 200),
+                   1,
+                   cv::LINE_AA);
+    }
+    
+    // Draw instructions
+    cv::putText(frame, "Click and drag sliders to adjust | Press ENTER to save | ESC to exit",
+               cv::Point(50, _h - 20),
+               cv::FONT_HERSHEY_SIMPLEX,
+               0.5,
+               Scalar(255, 255, 0),
+               1,
+               cv::LINE_AA);
+}
+
+///
+/// Get which slider (if any) is at the given position.
+/// Returns: -1 if no slider, 0-2 for slider index
+///
+int ConfigGui::getSliderAtPosition(int x, int y)
+{
+    const int slider_x = 50;
+    const int slider_width = 500;
+    const int slider_height = 20;
+    const int slider_y_start = _h - 150;  // Use original height before scaling
+    const int slider_spacing = 45;
+    const int click_margin = 15;  // Allow clicking slightly outside the bar
+    
+    for (int i = 0; i < 3; i++) {
+        int slider_y = slider_y_start + i * slider_spacing;
+        
+        if (x >= slider_x - click_margin &&
+            x <= slider_x + slider_width + click_margin &&
+            y >= slider_y - click_margin &&
+            y <= slider_y + slider_height + click_margin) {
+            return i;
+        }
+    }
+    
+    return -1;
+}
+
+///
+/// Update a slider value based on mouse X position.
+///
+void ConfigGui::updateSliderValue(int sliderIndex, int x)
+{
+    const int slider_x = 50;
+    const int slider_width = 500;
+    
+    // Clamp x to slider range
+    x = clamp(x, slider_x, slider_x + slider_width);
+    
+    // Calculate normalized position (0.0 to 1.0)
+    float normalized = (x - slider_x) / (float)slider_width;
+    
+    // Update appropriate slider
+    if (sliderIndex == 0) {
+        // Elevation: -90 to +90 (slider 0-180)
+        _slider_elevation = (int)(normalized * 180);
+    } else if (sliderIndex == 1) {
+        // Azimuth: -180 to +180 (slider 0-360)
+        _slider_azimuth = (int)(normalized * 360);
+    } else if (sliderIndex == 2) {
+        // Twist: -180 to +180 (slider 0-360)
+        _slider_twist = (int)(normalized * 360);
+    }
+}
+
+///
 /// Update animal coordinate frame estimate.
 ///
 bool ConfigGui::updateRt(const string& ref_str, Mat& R, Mat& t)
@@ -400,6 +727,7 @@ bool ConfigGui::run()
 
     /// Interactive window.
     cv::namedWindow("configGUI", cv::WINDOW_AUTOSIZE);
+    _input_data.parent = this;  // Set parent pointer for slider interaction
     cv::setMouseCallback("configGUI", onMouseEvent, &_input_data);
 
     /// If reconfiguring, then delete pre-computed values.
@@ -905,11 +1233,11 @@ bool ConfigGui::run()
                 printf("  The camera's reference frame is defined as: X = image right (cols); Y = image down (rows); Z = into image (out from camera)\n");
                 printf("  The animal's reference frame is defined as: X = forward; Y = right; Z = down\n");
                 
-                printf("\n  There are 5 possible methods for defining the animal's coordinate frame:\n");
+                printf("\n  There are 6 possible methods for defining the animal's coordinate frame:\n");
                 printf("\n\t 1 (XY square) : [Default] Click the four corners of a square shape that is aligned with the animal's X-Y axes. This method is recommended when the camera is above/below the animal.\n");
                 printf("\n\t 2 (YZ square) : Click the four corners of a square shape that is aligned with the animal's Y-Z axes. This method is recommended when the camera is in front/behind the animal.\n");
                 printf("\n\t 3 (XZ square) : Click the four corners of a square shape that is aligned with the animal's X-Z axes. This method is recommended when the camera is to the animal's left/right.\n");
-                // printf("\n\t 4 (manual)    : Rotate a visualisation of the animal's coordinate frame to align with the orientation of the animal. This method is not recommended as it is inaccurate.\n");
+                printf("\n\t 4 (sliders)   : Use elevation, azimuth, and twist sliders to interactively position and orient the animal. Recommended for most setups.\n");
                 printf("\n\t 5 (external)  : The transform between the camera and animal reference frames can also be defined by hand by editing the appropriate variables in the config file. This method is only recommended when the transform is known by some other means.\n");
                 
                 // input loop
@@ -948,12 +1276,18 @@ bool ConfigGui::run()
 							changeState(R_XZ);
                             break;
                             
-                        // case 4:
-                            // // advance state
-                            // BOOST_LOG_TRIVIAL(debug) << "New state: R_MAN";
-                            // _input_data.mode = R_MAN;
-                            // break;
-                            
+                        case 4:
+                            printf("\n\n\n  Slider method.\n\n  Use the sliders to position and orient the animal on the ball:\n");
+                            printf("  - Elevation: -90 (bottom) to +90 (top of ball)\n");
+                            printf("  - Azimuth: -180 to +180 (position around the ball, 0 = toward camera)\n");
+                            printf("  - Twist: -180 to +180 (animal heading, 0 = facing away from camera at top)\n\n");
+                            printf("  The axes update in real-time as you adjust the sliders.\n\n");
+                            printf("  Press ENTER when you are satisfied with the animal's axis, or press ESC to exit..\n\n");
+                            c2a_src = "sliders";
+                            // advance state
+                            changeState(R_SLIDER);
+                            break;
+                           
                         case 5:
                             c2a_src = "ext";
                             // advance state
@@ -1136,7 +1470,49 @@ bool ConfigGui::run()
                     }
                 }
                 break;
-            
+               
+            /// Define animal coordinate frame using sliders.
+            case R_SLIDER:
+                /// One-time initialization of slider values.
+                if (!_slider_initialized) {
+                    // Initialize slider values: elevation=90 (top), azimuth=180 (0 deg), twist=180 (0 deg)
+                    _slider_elevation = 180;  // represents +90 degrees (top of ball)
+                    _slider_azimuth = 180;    // represents 0 degrees (toward camera)
+                    _slider_twist = 180;      // represents 0 degrees (reference orientation)
+                    _slider_initialized = true;
+                }
+               
+                /// Compute R and t from current slider values.
+                computeRtFromSliders(_slider_elevation, _slider_azimuth, _slider_twist, R, t, r, c);
+               
+                /// Draw fitted circumference.
+                if (r > 0) {
+                    drawCircle_camModel(disp_frame, _cam_model, c, r, Scalar(255, 0, 0), false);
+                }
+               
+                /// Draw axes for visual feedback.
+                drawC2AAxes(disp_frame, R, t, r, c);
+               
+                /// Draw custom sliders on frame.
+                drawCustomSliders(disp_frame);
+               
+                /// Display.
+                if (_disp_scl > 0) {
+                    cv::resize(disp_frame, disp_frame, cv::Size(), _disp_scl, _disp_scl);
+                }
+                cv::imshow("configGUI", disp_frame);
+                key = cv::waitKey(5);
+               
+                /// State machine logic.
+                if ((key == 0x0d) || (key == 0x0a)) {   // ENTER
+                    if (!saveC2ATransformFromSliders(R, t)) {
+                        LOG_ERR("Error writing coordinate transform to config file!");
+                        open = false;
+                    }
+                    changeState(EXIT);
+                }
+                break;
+               
             // /// Define animal coordinate frame.
             // case R_MAN:
             

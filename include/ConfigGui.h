@@ -27,6 +27,10 @@ public:
     bool is_open();
     bool run();
     
+    // Public methods for slider interaction (called from mouse callback)
+    int getSliderAtPosition(int x, int y);
+    void updateSliderValue(int sliderIndex, int x);
+    
     enum INPUT_MODE {
         CIRC_INIT,
         CIRC_PTS,
@@ -37,11 +41,12 @@ public:
         R_XY,
         R_YZ,
         R_XZ,
+        R_SLIDER,
         R_MAN,
         R_EXT,
         EXIT
     };
-	std::string INPUT_MODE_STR[12] = {
+	std::string INPUT_MODE_STR[13] = {
 		"CIRC_INIT",
 		"CIRC_PTS",
 		"IGNR_INIT",
@@ -51,6 +56,7 @@ public:
 		"R_XY",
 		"R_YZ",
 		"R_XZ",
+		"R_SLIDER",
 		"R_MAN",
 		"R_EXT",
 		"EXIT"
@@ -65,12 +71,20 @@ public:
         INPUT_MODE mode;
         float ptScl;
         
+        // Slider interaction state
+        int activeSlider;  // -1 = none, 0 = elevation, 1 = azimuth, 2 = twist
+        bool sliderDragging;
+        ConfigGui* parent;  // Pointer to parent ConfigGui for slider methods
+        
         INPUT_DATA() {
             newEvent = false;
             mode =  CIRC_INIT;
             cursorPt.x = -1;
             cursorPt.y = -1;
             ptScl = -1;
+            activeSlider = -1;
+            sliderDragging = false;
+            parent = nullptr;
             addPoly();
         }
         
@@ -87,7 +101,12 @@ private:
     void drawC2AAxes(cv::Mat& disp_frame, const cv::Mat& R, const cv::Mat& t, const double& r, const CmPoint& c);
     void drawC2ACorners(cv::Mat& disp_frame, const std::string& ref_str, const cv::Mat& R, const cv::Mat& t);
     bool saveC2ATransform(const std::string& ref_str, const cv::Mat& R, const cv::Mat& t);
-
+    
+    bool computeRtFromSliders(int el_slider, int az_slider, int twist_slider,
+                              cv::Mat& R, cv::Mat& t, const double& roi_r, const CmPoint& roi_c);
+    bool saveC2ATransformFromSliders(const cv::Mat& R, const cv::Mat& t);
+    void drawCustomSliders(cv::Mat& frame);
+    
     void changeState(INPUT_MODE new_state);
     
 private:
@@ -99,4 +118,10 @@ private:
     INPUT_DATA _input_data;
 
     std::shared_ptr<FrameSource> _source;
+    
+    // Slider state variables for R_SLIDER mode
+    int _slider_elevation;
+    int _slider_azimuth;
+    int _slider_twist;
+    bool _slider_initialized;
 };
