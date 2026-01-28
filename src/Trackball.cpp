@@ -60,6 +60,8 @@ const bool DO_DISPLAY_DEFAULT = true;
 const bool SAVE_RAW_DEFAULT = false;
 const bool SAVE_DEBUG_DEFAULT = false;
 
+const bool ACCUMULATE_MAP_DEFAULT = true;
+
 /// OpenCV codecs for video writing
 const vector<vector<std::string>> CODECS = {
     {"h264", "H264", "avi"},
@@ -465,6 +467,16 @@ Trackball::Trackball(string cfg_fn, string src_override)
         _sphere_view.setTo(Scalar::all(128));
     }
 
+    /// Surface mapping.
+    _accumulate_map = ACCUMULATE_MAP_DEFAULT;
+    if (!_cfg.getBool("accumulate_map", _accumulate_map)) {
+        LOG_WRN("Warning! Using default value for accumulate_map (%d).", _accumulate_map);
+        _cfg.add("accumulate_map", _accumulate_map ? "y" : "n");
+    }
+    if (!_accumulate_map) {
+        LOG("Map accumulation disabled - will forget surface outside current view.");
+    }
+
     // do video stuff
     if (_save_raw || _save_debug) {
         // find codec
@@ -820,6 +832,13 @@ void Trackball::updateSphere()
         _sphere_view.setTo(Scalar::all(128));
     }
 
+    // Track which pixels are currently being viewed (for non-accumulation mode)
+    Mat viewed_mask;
+    if (!_accumulate_map) {
+        viewed_mask.create(_map_h, _map_w, CV_8UC1);
+        viewed_mask.setTo(Scalar::all(0));
+    }
+
     double p2s[3];
     int cnt = 0, good = 0;
     int px = 0, py = 0;
@@ -845,6 +864,11 @@ void Trackball::updateSphere()
             if (!_sphere_model->vectorToPixelIndex(p2s, px, py)) { continue; }
             uint8_t& map = _sphere_map.data[py * _sphere_map.step + px];
 
+            // mark pixel as viewed (for non-accumulation mode)
+            if (!_accumulate_map) {
+                viewed_mask.at<uint8_t>(py, px) = 255;
+            }
+
             // update map tile
             if ((map == 0) || (map == 255)) {
                 // map tile frozen
@@ -868,6 +892,75 @@ void Trackball::updateSphere()
     }
     else {
         LOG_DBG("Sphere ROI match overlap: 0%%");
+    }
+
+    // Forget distant surface if accumulation is disabled
+    if (!_accumulate_map && cnt > 0) {
+        forgetDistantSurface(viewed_mask);
+    }
+}
+
+///
+/// Reset parts of the sphere map that are outside the dilated current view.
+/// This implements the non-accumulation mode where the system
+/// forgets what it has seen in distant parts of the ball's surface.
+///
+void Trackball::forgetDistantSurface(Mat& viewed_mask)
+{
+    const int margin = 1;
+
+    // Create the keep region by dilating the viewed mask
+    Mat keep_region;
+    if (margin > 0) {
+        // Create circular structuring element for dilation
+        int kernel_size = 2 * margin + 1;
+        Mat kernel = cv::getStructuringElement(MORPH_ELLIPSE, Size(kernel_size, kernel_size));
+        cv::dilate(viewed_mask, keep_region, kernel);
+    } else {
+        // No dilation - keep only exactly viewed pixels
+        keep_region = viewed_mask.clone();
+    }
+
+    // Handle horizontal wrap-around: if viewed pixels are near left edge,
+    // the dilation should wrap to the right edge and vice versa
+    if (margin > 0) {
+        // Check left edge (columns 0 to margin-1) - if any viewed, dilate from right edge
+        for (int y = 0; y < _map_h; y++) {
+            for (int x = 0; x < margin; x++) {
+                if (viewed_mask.at<uint8_t>(y, x) > 0) {
+                    // Mark corresponding pixels on right edge as keep
+                    for (int dx = -margin; dx <= 0; dx++) {
+                        int wrap_x = _map_w + dx;
+                        if (wrap_x >= 0 && wrap_x < _map_w) {
+                            keep_region.at<uint8_t>(y, wrap_x) = 255;
+                        }
+                    }
+                }
+            }
+            // Check right edge (columns _map_w-margin to _map_w-1)
+            for (int x = _map_w - margin; x < _map_w; x++) {
+                if (viewed_mask.at<uint8_t>(y, x) > 0) {
+                    // Mark corresponding pixels on left edge as keep
+                    for (int dx = 0; dx <= margin; dx++) {
+                        int wrap_x = dx;
+                        if (wrap_x >= 0 && wrap_x < _map_w) {
+                            keep_region.at<uint8_t>(y, wrap_x) = 255;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Reset all pixels outside the keep region to 128 (unknown)
+    for (int y = 0; y < _map_h; y++) {
+        uint8_t* pmap = _sphere_map.ptr(y);
+        const uint8_t* pkeep = keep_region.ptr(y);
+        for (int x = 0; x < _map_w; x++) {
+            if (pkeep[x] == 0 && pmap[x] != 128) {
+                pmap[x] = 128;
+            }
+        }
     }
 }
 
@@ -1488,7 +1581,7 @@ void Trackball::dumpStats()
 ///
 bool Trackball::writeTemplate(std::string fn)
 {
-    if (!_init) { return false; }
+    if (!_init || !_accumulate_map) { return false; }
     
     string template_fn = _base_fn + "-template.png";
 

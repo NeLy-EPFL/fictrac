@@ -110,6 +110,7 @@ private:
     virtual double objective(unsigned n, const double* x, double* grad) { return testRotation(x); }
     bool doSearch(bool allow_global);
     void updateSphere();
+    void forgetDistantSurface(cv::Mat& viewed_mask);
     void updatePath();
     bool logData();
 
@@ -168,6 +169,9 @@ private:
 
     /// Program.
     bool _init, _reset, _clean_map;
+
+    /// Surface mapping.
+    bool _accumulate_map;
 
     /// Data
     DATA _data;
