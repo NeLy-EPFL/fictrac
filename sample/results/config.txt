@@ -1,4 +1,5 @@
-## FicTrac v2.1.2 config file (build date Aug  4 2024)
+## FicTrac v2.1.2 config file (build date Jan 28 2026)
+accumulate_map   : y
 c2a_cnrs_xy      : { 191, 171, 128, 272, 36, 227, 111, 148 }
 c2a_r            : { 0.738663, -0.395896, -0.393603 }
 c2a_src          : c2a_cnrs_xy
