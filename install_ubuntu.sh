@@ -11,16 +11,20 @@ ver="$(lsb_release -sr)"
 echo "Found Ubuntu version $ver"
 
 if [ "$ver" = "22.04" ] || [ "$ver" = "20.04" ]; then
-	echo
-	echo "+-- Installing dependencies ---+"
-	echo
-	sudo apt-get update
-	sudo apt-get install -y gcc g++ cmake libavcodec-dev libnlopt-dev libboost-dev libopencv-dev
-	
+	FICTRAC_DIR="$(dirname "$0")"
+	if [ ! -d "$FICTRAC_DIR/build" ]; then
+		echo
+		echo "+-- Installing dependencies ---+"
+		echo
+		sudo apt update
+		sudo apt install -y gcc g++ cmake libavcodec-dev libnlopt-dev libboost-dev libopencv-dev
+	else
+		echo "Previous build detected, so skipping dependency installation."
+	fi
+
 	echo
 	echo "+-- Creating build directory --+"
 	echo
-	FICTRAC_DIR="$(dirname "$0")"
 	cd "$FICTRAC_DIR"	# make sure we are in fictrac dir
 	if [ -d ./build ]; then
 		echo "Removing existing build dir"
