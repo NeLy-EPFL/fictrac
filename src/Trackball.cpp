@@ -586,6 +586,9 @@ Trackball::~Trackball()
     _init = false;
     _active = false;
 
+    /// Wake up drawing thread so it can drain the queue and exit.
+    _drawCond.notify_all();
+
     if (_thread && _thread->joinable()) {
         _thread->join();
     }
@@ -1307,13 +1310,14 @@ void Trackball::processDrawQ()
     unique_lock<mutex> l(_drawMutex);
 
     /// Process drawing queue.
-    while (_active) {
-        /// Wait for data.
-        while (_drawQ.size() == 0) {
+    while (true) {
+        /// Wait for data (or shutdown signal).
+        while (_drawQ.size() == 0 && _active) {
             _drawCond.wait(l);
-            if (!_active) { break; }
         }
-        if (!_active) { break; }
+
+        /// Exit only after queue is empty.
+        if (_drawQ.size() == 0 && !_active) { break; }
 
         /// Process all queued frames (don't skip any for video recording).
         auto localQ = _drawQ;
@@ -1323,7 +1327,6 @@ void Trackball::processDrawQ()
 
         for (auto& data : localQ) {
             drawCanvas(data);
-            if (!_active) { break; }
         }
 
         l.lock();
