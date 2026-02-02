@@ -64,7 +64,7 @@ const bool ACCUMULATE_MAP_DEFAULT = true;
 
 /// OpenCV codecs for video writing
 const vector<vector<std::string>> CODECS = {
-    {"h264", "H264", "avi"},
+    {"h264", "avc1", "mp4"},
     {"xvid", "XVID", "avi"},
     {"mpg4", "MP4V", "mp4"},
     {"mjpg", "MJPG", "avi"},
