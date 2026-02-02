@@ -1315,19 +1315,16 @@ void Trackball::processDrawQ()
         }
         if (!_active) { break; }
 
-        /// Retrieve data.
-        auto data = _drawQ.back();
-
-        /// Clear all other frames (only draw latest available).
-        if (_drawQ.size() > 1) {
-            LOG_DBG("Skipping drawing %d frames.", _drawQ.size() - 1);
-        }
+        /// Process all queued frames (don't skip any for video recording).
+        auto localQ = _drawQ;
         _drawQ.clear();
 
         l.unlock();
 
-        /// Draw canvas unlocked.
-        drawCanvas(data);
+        for (auto& data : localQ) {
+            drawCanvas(data);
+            if (!_active) { break; }
+        }
 
         l.lock();
     }
