@@ -659,7 +659,6 @@ void Trackball::process()
     while (!_kill && _active && _frameGrabber->getNextFrameSet(_src_frame, _roi_frame, _data.ts, _data.ms)) {
         t1 = ts_ms();
 
-        PRINT("");
         LOG("Frame %d", _data.cnt);
 
         /// Handle reset request

@@ -27,14 +27,15 @@ int main(int argc, char *argv[])
      PRINT("/// FicTrac:\tA webcam-based method for generating fictive paths.\n///");
      PRINT("/// Usage:\tfictrac CONFIG_FN [-v LOG_VERBOSITY -s SRC_FN]\n///");
      PRINT("/// \tCONFIG_FN\tPath to input config file (defaults to config.txt).");
-     PRINT("/// \tLOG_VERBOSITY\t[Optional] One of DBG, INF, WRN, ERR.");
+     PRINT("/// \tLOG_VERBOSITY\t[Optional] One of DBG, INF, WRN (default), ERR.");
      PRINT("/// \tSRC_FN\t\t[Optional] Override src_fn param in config file.");
      PRINT("///");
      PRINT("/// Version: %d.%d.%d (build date: %s)", FICTRAC_VERSION_MAJOR, FICTRAC_VERSION_MIDDLE, FICTRAC_VERSION_MINOR, __DATE__);
      PRINT("///\n");
 
-	/// Parse args.
-	string log_level = "info";
+	/// Parse args. Default verbosity lives in Logger::verbosity(); only
+	/// override it here if the user passed -v/--verbosity explicitly.
+	string log_level = "";
 	string config_fn = "config.txt";
     string src_fn = "";
     bool do_stats = false;
@@ -44,7 +45,7 @@ int main(int argc, char *argv[])
 				log_level = argv[i];
 			}
 			else {
-                LOG_ERR("-v/--verbosity requires one argument (debug < info (default) < warn < error)!");
+                LOG_ERR("-v/--verbosity requires one argument (debug < info < warn (default) < error)!");
 				return -1;
 			}
         }
@@ -65,8 +66,10 @@ int main(int argc, char *argv[])
 		}
 	}
 
-    /// Set logging level.
-    Logger::setVerbosity(log_level);
+    /// Override logging level only if -v was given.
+    if (!log_level.empty()) {
+        Logger::setVerbosity(log_level);
+    }
 
 	// Catch cntl-c
     signal(SIGINT, ctrlcHandler);

@@ -34,7 +34,7 @@ public:
 
     /// Get/set verbosity
     static LogLevel& verbosity() {
-        static LogLevel v = INF;   // default to INF
+        static LogLevel v = WRN;   // default to WRN
         return v;
     };
 

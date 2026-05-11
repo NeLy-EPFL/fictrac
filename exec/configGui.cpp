@@ -30,14 +30,15 @@ int main(int argc, char *argv[])
     PRINT("/// configGui:\tA GUI for configuring FicTrac.\n///\t\tThis program must be run for each new input source,\n///\t\tor if the camera is moved.\n///");
     PRINT("/// Usage:\tconfigGui CONFIG_FN [-v LOG_VERBOSITY -s SRC_FN]\n///");
     PRINT("/// \tCONFIG_FN\tPath to input/output config file.");
-    PRINT("/// \tLOG_VERBOSITY\t[Optional] One of DBG, INF, WRN, ERR.");
+    PRINT("/// \tLOG_VERBOSITY\t[Optional] One of DBG, INF, WRN (default), ERR.");
     PRINT("/// \tSRC_FN\t\t[Optional] Override src_fn param in config file.");
     PRINT("///");
 	PRINT("/// Version: %d.%d.%d (build date: %s)", FICTRAC_VERSION_MAJOR, FICTRAC_VERSION_MIDDLE, FICTRAC_VERSION_MINOR, __DATE__);
     PRINT("///\n");
 
-    /// Parse args.
-    string log_level = "info";
+    /// Parse args. Default verbosity lives in Logger::verbosity(); only
+    /// override it here if the user passed -v/--verbosity explicitly.
+    string log_level = "";
     string config_fn = "config.txt";
     string src_fn = "";
     for (int i = 1; i < argc; ++i) {
@@ -45,7 +46,7 @@ int main(int argc, char *argv[])
             if (++i < argc) {
                 log_level = argv[i];
             } else {
-                LOG_ERR("-v/--verbosity requires one argument (debug < info (default) < warn < error)!");
+                LOG_ERR("-v/--verbosity requires one argument (debug < info < warn (default) < error)!");
                 PRINT("\n\nHit ENTER to exit..");
                 getchar_clean();
                 return -1;
@@ -62,9 +63,11 @@ int main(int argc, char *argv[])
             config_fn = argv[i];
         }
     }
-    
-    /// Set logging level.
-    Logger::setVerbosity(log_level);
+
+    /// Override logging level only if -v was given.
+    if (!log_level.empty()) {
+        Logger::setVerbosity(log_level);
+    }
     
     /// Init config object, parse config file.
     ConfigGui cfg(config_fn, src_fn);
